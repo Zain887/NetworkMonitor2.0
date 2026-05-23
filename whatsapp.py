@@ -43,7 +43,66 @@ class WhatsAppSender:
         phone_str = str(phone_raw).strip()
         return "".join(c for c in phone_str if c.isdigit())
 
-    def dispatch_alert(self, alert_item):
+    def _attempt_delivery(self, phone, msg):
+        """Internal helper to process a single delivery attempt."""
+        chat_url = f"https://web.whatsapp.com/send?phone={phone}"
+        self.driver.get(chat_url)
+
+        # 1. Handle potential 'Invalid Phone Number' or overlay popup blockers
+        # Sometimes a lingering dialog from a previous breakdown stalls the view
+        try:
+            # Look for common WhatsApp error popups ('OK' buttons) to dismiss them
+            ok_button = WebDriverWait(self.driver, 4).until(
+                EC.element_to_be_clickable((By.XPATH, "//div[@role='button'][span[contains(.,'OK')]]"))
+            )
+            ok_button.click()
+            time.sleep(1)
+            # Re-request the URL after clearing a modal blockers
+            self.driver.get(chat_url)
+        except Exception:
+            pass # No pop-ups blocking the path, proceed normally
+
+        # 2. Modern XPaths for the input container
+        # Added broader container pathways to counter structural shifts
+        xpaths_to_try = [
+            "//div[@contenteditable='true'][@data-tab='10']",
+            "//footer//div[@contenteditable='true']",
+            "//div[@role='textbox']",
+            "//div[@aria-label='Type a message']"
+        ]
+        
+        box = None
+        # Explicit wait dynamically tracking layout visibility over structural states
+        for path in xpaths_to_try:
+            try:
+                box = WebDriverWait(self.driver, 12).until(
+                    EC.element_to_be_clickable((By.XPATH, path))
+                )
+                if box:
+                    break
+            except Exception:
+                continue
+        
+        if box is None:
+            raise Exception("WhatsApp Web structure layout mismatch. Textbox unreachable.")
+
+        box.click()
+        time.sleep(0.5)
+
+        # Paste execution string safely via clipboard data simulation
+        script = """
+        const dataTransfer = new DataTransfer();
+        dataTransfer.setData('text/plain', arguments[0]);
+        const event = new ClipboardEvent('paste', { clipboardData: dataTransfer, bubbles: true });
+        arguments[1].dispatchEvent(event);
+        """
+        self.driver.execute_script(script, msg, box)
+        
+        time.sleep(1.2) # Marginally increased buffer for slower dynamic rendering engines
+        box.send_keys(Keys.ENTER)
+        time.sleep(3.0) # Allocation window ensuring transmission pipeline completes
+
+    def dispatch_alert(self, alert_item, max_retries=3):
         name = alert_item["name"]
         ip = alert_item["ip"]
         status = alert_item["status"]
@@ -53,52 +112,25 @@ class WhatsAppSender:
             logger.error(f"Missing or corrupt phone data for {name}. Alert aborted.")
             return
 
-        try:
-            msg = f"*{status}*\n\nDevice: {name}\nIP: {ip}\nTime: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            chat_url = f"https://web.whatsapp.com/send?phone={phone}"
-            logger.log(f"Opening chat payload viewport for {name} ({phone})...")
-            self.driver.get(chat_url)
+        msg = f"*{status}*\n\nDevice: {name}\nIP: {ip}\nTime: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        logger.log(f"Opening chat payload viewport for {name} ({phone})...")
 
-            box = None
-            xpaths_to_try = [
-                "//footer//div[@contenteditable='true']",
-                "//div[@contenteditable='true'][@aria-label='Type a message']",
-                "//div[@contenteditable='true'][@data-tab='10']",
-                "//div[@role='textbox']"
-            ]
-            
-            for path in xpaths_to_try:
-                try:
-                    box = WebDriverWait(self.driver, 15).until(
-                        EC.element_to_be_clickable((By.XPATH, path))
-                    )
-                    if box:
-                        break
-                except Exception:
-                    continue
-            
-            if box is None:
-                raise Exception("WhatsApp Web structure layout mismatch. Textbox unreachable.")
-
-            box.click()
-            time.sleep(0.5)
-
-            # Execution block mapping string parameters using ClipboardEvents data
-            script = """
-            const dataTransfer = new DataTransfer();
-            dataTransfer.setData('text/plain', arguments[0]);
-            const event = new ClipboardEvent('paste', { clipboardData: dataTransfer, bubbles: true });
-            arguments[1].dispatchEvent(event);
-            """
-            self.driver.execute_script(script, msg, box)
-            
-            time.sleep(1)
-            box.send_keys(Keys.ENTER)
-            time.sleep(3.0)
-            logger.success(f"Alert successfully pushed to {phone}")
-            
-        except Exception as e:
-            logger.error(f"WhatsApp Delivery Failed for {name}: {e}")
+        # Retry loop logic architecture
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    logger.warn(f"🔄 Retrying transmission to {name} (Attempt {attempt}/{max_retries})...")
+                
+                self._attempt_delivery(phone, msg)
+                logger.success(f"Alert successfully pushed to {phone} on attempt {attempt}")
+                return # Core break sequence upon validated performance execution
+                
+            except Exception as e:
+                logger.error(f"Attempt {attempt} failed for {name}: {e}")
+                if attempt == max_retries:
+                    logger.critical(f"❌ Final Delivery Defeat for {name} after {max_retries} cycles.")
+                else:
+                    time.sleep(5) # Cooldown structural back-off padding before striking again
 
     def close(self):
         try:
