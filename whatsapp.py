@@ -44,64 +44,94 @@ class WhatsAppSender:
         return "".join(c for c in phone_str if c.isdigit())
 
     def _attempt_delivery(self, phone, msg):
-        """Internal helper to process a single delivery attempt."""
+        """Internal helper to process a single delivery attempt using stable JS Event injection."""
         chat_url = f"https://web.whatsapp.com/send?phone={phone}"
         self.driver.get(chat_url)
 
-        # 1. Handle potential 'Invalid Phone Number' or overlay popup blockers
-        # Sometimes a lingering dialog from a previous breakdown stalls the view
+        # 1. Handle overlay popups or modal blocking alerts
         try:
-            # Look for common WhatsApp error popups ('OK' buttons) to dismiss them
-            ok_button = WebDriverWait(self.driver, 4).until(
+            ok_button = WebDriverWait(self.driver, 5).until(
                 EC.element_to_be_clickable((By.XPATH, "//div[@role='button'][span[contains(.,'OK')]]"))
             )
             ok_button.click()
-            time.sleep(1)
-            # Re-request the URL after clearing a modal blockers
+            time.sleep(1.5)
             self.driver.get(chat_url)
         except Exception:
-            pass # No pop-ups blocking the path, proceed normally
+            pass 
 
-        # 2. Modern XPaths for the input container
-        # Added broader container pathways to counter structural shifts
-        xpaths_to_try = [
-            "//div[@contenteditable='true'][@data-tab='10']",
-            "//footer//div[@contenteditable='true']",
-            "//div[@role='textbox']",
-            "//div[@aria-label='Type a message']"
-        ]
+        # 2. Dynamic Wait: Ensure the core chat app wrapper structure is loaded
+        try:
+            WebDriverWait(self.driver, 20).until(
+                EC.presence_of_element_located((By.XPATH, "//div[@id='main'] | //footer"))
+            )
+        except Exception:
+            raise Exception("WhatsApp workspace failed to load in time.")
+
+        # 3. Pure JavaScript injection targeting the text box and handling state
+        js_send_script = """
+        const msgText = arguments[0];
         
-        box = None
-        # Explicit wait dynamically tracking layout visibility over structural states
-        for path in xpaths_to_try:
-            try:
-                box = WebDriverWait(self.driver, 12).until(
-                    EC.element_to_be_clickable((By.XPATH, path))
-                )
-                if box:
-                    break
-            except Exception:
-                continue
+        // Target text boxes using true CSS queries
+        const editableBox = document.querySelector('footer div[contenteditable="true"]') || 
+                            document.querySelector('div[class*="lexical-rich-text-input"] div[contenteditable="true"]') ||
+                            document.querySelector('div[role="textbox"]');
         
-        if box is None:
-            raise Exception("WhatsApp Web structure layout mismatch. Textbox unreachable.")
+        if (!editableBox) return "TEXTBOX_NOT_FOUND";
 
-        box.click()
-        time.sleep(0.5)
+        // Ensure paragraph node targets exist
+        let internalPara = editableBox.querySelector('p');
+        if (!internalPara) {
+            internalPara = document.createElement('p');
+            editableBox.appendChild(internalPara);
+        }
 
-        # Paste execution string safely via clipboard data simulation
-        script = """
-        const dataTransfer = new DataTransfer();
-        dataTransfer.setData('text/plain', arguments[0]);
-        const event = new ClipboardEvent('paste', { clipboardData: dataTransfer, bubbles: true });
-        arguments[1].dispatchEvent(event);
+        internalPara.innerText = msgText;
+
+        // Dispatches structural UI event chains so react logs the typing action
+        const trackingEvent = new InputEvent('input', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertText',
+            data: msgText
+        });
+        internalPara.dispatchEvent(trackingEvent);
+        
+        return "TEXT_INSERTED";
         """
-        self.driver.execute_script(script, msg, box)
-        
-        time.sleep(1.2) # Marginally increased buffer for slower dynamic rendering engines
-        box.send_keys(Keys.ENTER)
-        time.sleep(3.0) # Allocation window ensuring transmission pipeline completes
 
+        # Step 1: Insert the text via JS
+        result = self.driver.execute_script(js_send_script, msg)
+        if result == "TEXTBOX_NOT_FOUND":
+            raise Exception("WhatsApp Web structure layout mismatch. Textbox unreachable.")
+            
+        time.sleep(1.5) # Give WhatsApp's React state engine time to generate the send button
+
+        # Step 2: Native JavaScript click routine to bypass overlay intersections
+        js_click_button = """
+        const sendBtn = document.querySelector('span[data-icon="send"]') || 
+                        document.querySelector('button span[data-icon="send"]')?.parentElement ||
+                        document.querySelector('[data-testid="send"]') ||
+                        document.querySelector('button[data-tab="11"]');
+        
+        if (sendBtn) {
+            sendBtn.click(); // Native DOM execution bypasses click interception
+            return true;
+        }
+        return false;
+        """
+
+        try:
+            button_clicked = self.driver.execute_script(js_click_button)
+            if button_clicked:
+                logger.success("Send button clicked natively via JavaScript!")
+            else:
+                raise Exception("Send button could not be located in the DOM tree.")
+                
+        except Exception as e:
+            raise Exception(f"Failed to trigger send button: {e}")
+            
+        time.sleep(4.0) # Safety window for delivery confirmation
+                
     def dispatch_alert(self, alert_item, max_retries=3):
         name = alert_item["name"]
         ip = alert_item["ip"]
@@ -110,12 +140,11 @@ class WhatsAppSender:
 
         if not phone:
             logger.error(f"Missing or corrupt phone data for {name}. Alert aborted.")
-            return
+            return False
 
         msg = f"*{status}*\n\nDevice: {name}\nIP: {ip}\nTime: {time.strftime('%Y-%m-%d %H:%M:%S')}"
         logger.log(f"Opening chat payload viewport for {name} ({phone})...")
 
-        # Retry loop logic architecture
         for attempt in range(1, max_retries + 1):
             try:
                 if attempt > 1:
@@ -123,14 +152,16 @@ class WhatsAppSender:
                 
                 self._attempt_delivery(phone, msg)
                 logger.success(f"Alert successfully pushed to {phone} on attempt {attempt}")
-                return # Core break sequence upon validated performance execution
+                return True 
                 
             except Exception as e:
                 logger.error(f"Attempt {attempt} failed for {name}: {e}")
                 if attempt == max_retries:
-                    logger.critical(f"❌ Final Delivery Defeat for {name} after {max_retries} cycles.")
+                    logger.error(f"❌ Final Delivery Defeat for {name} after {max_retries} cycles.")
                 else:
-                    time.sleep(5) # Cooldown structural back-off padding before striking again
+                    time.sleep(5)
+                    
+        return False
 
     def close(self):
         try:
