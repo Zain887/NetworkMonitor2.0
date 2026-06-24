@@ -48,8 +48,8 @@ DASHBOARD_TEMPLATE = """
         .badge { font-size: 10px; font-weight: 700; padding: 4px 8px; border-radius: 4px; text-transform: uppercase; }
         .type-badge { background: rgba(255,255,255,0.05); color: var(--text-muted); }
         .dot-indicator { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-        .filter-tab-bar { display: flex; gap: 8px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 12px; }
-        .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 6px 12px; font-size: 13px; font-weight: 600; cursor: pointer; border-radius: 6px; transition: 0.15s; }
+        .filter-tab-bar { display: flex; gap: 8px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 12px; flex-wrap: wrap; }
+        .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 6px 12px; font-size: 13px; font-weight: 600; cursor: pointer; border-radius: 6px; transition: 0.15s; white-space: nowrap; }
         .tab-btn:hover, .tab-btn.active { color: var(--text-main); background: var(--bg-inner); }
         .wa-info-row { display: flex; justify-content: space-between; font-size: 13px; padding-bottom: 8px; border-bottom: 1px solid var(--bg-inner); }
         .wa-log-box { background: var(--bg-inner); padding: 12px; border-radius: 6px; font-size: 12px; font-family: monospace; line-height: 1.4; color: var(--text-main); border-left: 3px solid var(--status-orange); word-break: break-all; }
@@ -75,6 +75,7 @@ DASHBOARD_TEMPLATE = """
                     <button class="tab-btn active" onclick="setFilter('ALL')">All Devices</button>
                     <button class="tab-btn" onclick="setFilter('VOIP')">VoIP Subsystems</button>
                     <button class="tab-btn" onclick="setFilter('CAMERA')">Camera Nodes</button>
+                    <button class="tab-btn" onclick="setFilter('OFFLINE')" style="color: var(--status-red);">Offline Terminals</button>
                 </div>
                 <div id="nodes-container-inject" class="nodes-grid"></div>
             </div>
@@ -105,14 +106,26 @@ DASHBOARD_TEMPLATE = """
         function setFilter(type) {
             activeFilter = type;
             document.querySelectorAll('.tab-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.innerText.toUpperCase().includes(type) || (type === 'ALL' && btn.innerText.includes('All')));
+                // Modified active state assignment logic to reliably match exact internal filter variables
+                let matches = false;
+                if (type === 'ALL' && btn.innerText.includes('All')) matches = true;
+                else if (type === 'VOIP' && btn.innerText.includes('VoIP')) matches = true;
+                else if (type === 'CAMERA' && btn.innerText.includes('Camera')) matches = true;
+                else if (type === 'OFFLINE' && btn.innerText.includes('Offline')) matches = true;
+                btn.classList.toggle('active', matches);
             });
             renderCards(cachedDevices);
         }
         function renderCards(devices) {
             let html = '';
             devices.forEach(d => {
-                if (activeFilter !== 'ALL' && d.type !== activeFilter) return;
+                // Filter handling logic adjusted to cleanly filter by type rules OR specific offline status
+                if (activeFilter === 'OFFLINE') {
+                    if (d.status !== 'OFFLINE') return;
+                } else if (activeFilter !== 'ALL' && d.type !== activeFilter) {
+                    return;
+                }
+                
                 let col = d.status === 'OFFLINE' ? 'var(--status-red)' : (d.status.startsWith('SIP') ? 'var(--status-orange)' : 'var(--status-green)');
                 html += `<div class="node-unit" style="border-left: 3px solid ${col};">
                     <div class="node-details">
